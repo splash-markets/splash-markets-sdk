@@ -1,0 +1,43 @@
+{
+   "compilerOptions": {
+     /* Base Options: */
+     "esModuleInterop": true, // Enables compatibility with CommonJS modules
+     "skipLibCheck": true, // Skip type checking of declaration files
+     "target": "ES2022", // Target latest ECMAScript features supported by Node.js LTS
+     "allowJs": true, // Allow JavaScript files to be compiled
+     "resolveJsonModule": true, // Include modules imported with .json extension
+     "moduleDetection": "force", // Treat files as modules even if no import/export
+     "isolatedModules": true, // Ensure files can be safely transpiled without relying on other imports
+ 
+     /* Strictness */
+     "strict": true, // Enable all strict type-checking options
+     "noUncheckedIndexedAccess": true, // Add 'undefined' to index signatures
+ 
+     /* Modules */
+     "module": "ESNext", // Use latest ES modules for maximum compatibility (Node/Bun/Deno/Web)
+     "moduleResolution": "node", // Node-style resolution (doesn't require .js extensions in source)
+     "lib": ["ES2022"], // Use ES2022 library for broad compatibility
+ 
+    /* Paths */
+    "rootDir": "./src", // Specify the root directory of input files
+    "baseUrl": ".",
+    "paths": {
+        "@/*": ["src/*"]
+    },
+ 
+     /* Output */
+     "outDir": "./dist", // Output directory for compiled files
+     "noEmit": false, // Allow emitting files for pre-compilation
+     "declaration": true, // Generate .d.ts files for TypeScript support
+     "declarationMap": true, // Generate source maps for declarations
+ 
+     /* Source Maps */
+     "sourceMap": true, // Generate source map files for debugging
+ 
+     /* Type Roots */
+     "typeRoots": ["./node_modules/@types"] // Specify folders for type declarations
+   },
+   "include": ["src/**/*.ts"], // Specify files to include in compilation
+   "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"] // Specify files/folders to exclude
+}
+ 
