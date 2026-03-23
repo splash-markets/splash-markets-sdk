@@ -249,8 +249,8 @@ Splash Markets supports several market types, each with different characteristic
 **Market Types:**
 - **Uncontrolled** - Odds are determined purely by liquidity pool mechanics (CFMM). No oracle needed.
 - **DirectControlled** - Market with controlled odds that require an oracle account.
-- **IntControlled** - Intermediate controlled market type.
-- **AdvControlled** - Advanced controlled market with deviation limits and risk management. Requires an oracle account.
+- **IntControlled** - Intermediate controlled market type that require an oracle account.
+- **AdvControlled** - Advanced controlled market with risk parameters (`max_risk`, `bonus_cap`, `over_risk_penalty`) and oracle-driven liquidity. Requires an oracle account.
 - **OneVOne**, **OneVMany**, **DutchAuction**, **AdvDutchAuction** - Specialized market types. No oracle needed.
 
 **Understanding `needsOracle`:**
@@ -292,7 +292,7 @@ When placing bets on markets, you must specify whether the market requires an or
    - Live BUYS can be rolled back (refunded) if they occur within a rollback period (stored onchain in the market live rollback account)
    - Live betting requires the market status to be `Live` and may have different odds calculations
 
-5. **Fee payer vs owner**: Use the optional `feePayer` (and `accountFeePayer` for close instructions) in actions when a relayer pays fees; otherwise omit them and `owner` is used as fee payer.
+5. **Fee payer vs owner**: Owner is the economic beneficiary of the account (for example the bettor or depositer). Use the optional `feePayer` (and `accountFeePayer` for close instructions if different from the close transaction feePayer) in actions when a relayer pays fees; otherwise omit them and `owner` is used as fee payer.
 
 ## Utility Functions
 
@@ -428,9 +428,9 @@ const needsOracle = market.__kind === 'DirectControlled' || market.__kind === 'A
 
 // In reality, you should have stored the market type in your database and not fetched it from the chain each time
 
-// Check odds received if betting $100.00
-const outcomesWithOdds = await getMarketOdds(rpc, productId, marketId, needsOracle, uiToScaled(100, 6));
-console.log(`Team A decimal odds if betting $100.00: ${outcomesWithOdds[0].stakeOdds_dec}`);
+// Check odds received if betting $100.00 on outcome index 1 (1-based)
+const outcomesWithOdds = await getMarketOdds(rpc, productId, marketId, needsOracle, 1, uiToScaled(100, 6), 'BuyFor');
+console.log(`Team A decimal odds after trade sizing: ${outcomesWithOdds[0].amountOdds_dec}`);
 ```
 
 ### Placing a Bet
@@ -494,7 +494,7 @@ const marketCreationInstruction = await getControlledCreateMarketInstruction(
    outcomes,      // e.g. [{ name: "Team A", odds_dec: 2.0 }, { name: "Team B", odds_dec: 2.0 }]
    liquidity_ui,
    parlaySettings,
-   null,          // riskControl (required for AdvControlled)
+   null,          // riskControl: null for DirectControlled; for AdvControlled use { maxRisk, bonusCap, overRiskPenalty }
    { mint: usdcMint, decimals: 6 },  // tokenInfo
    tokenProgram
 );
@@ -529,3 +529,8 @@ import type {
 } from 'splash-markets-sdk';
 ```
 
+# Update Log
+## 0.0.2
+- Exported codex module
+## 0.0.3
+- update AdvControlled markets

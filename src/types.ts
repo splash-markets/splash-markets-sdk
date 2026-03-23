@@ -18,8 +18,8 @@ export type MarketStatus =
 export type MarketType =
    | { __kind: 'Uncontrolled' }
    | { __kind: 'DirectControlled' }
-   | { __kind: 'AdvControlled' }
    | { __kind: 'IntControlled' }
+   | { __kind: 'AdvControlled' }
    | { __kind: 'OneVOne' }
    | { __kind: 'OneVMany' }
    | { __kind: 'DutchAuction' }
@@ -265,9 +265,11 @@ export type AdvControlledMarket = {
    base: BaseMarket;
    go_live_time: number; // u32
    rollback_account_key: Address;
-   max_deviation: number; // u16
    max_risk: bigint; // u64
-   liquidity: bigint; // u64: increases on buy, decreases on sell; virtual balance_sum = liquidity * liquidity_factor / PC_SCALE
+   bonus_cap: number; // u16
+   over_risk_penalty: number; // u16
+   /** On-chain counter (buy/sell); for pricing, effective liquidity is oracle `ControlledLiquidity.liquidity` when set, else `liquidity * oracle.liquidity_factor / PC_SCALE`. */
+   liquidity: bigint; // u64
    outcomes: ControlledMarketOutcome[];
    parlay_settings: ParlaySettings;
 };
@@ -276,7 +278,6 @@ export type IntControlledMarket = {
    base: BaseMarket;
    go_live_time: number; // u32
    rollback_account_key: Address;
-   max_deviation: number; // u16
    max_risk: bigint; // u64
    outcomes: ControlledMarketOutcome[];
    parlay_settings: ParlaySettings;
@@ -314,7 +315,6 @@ export type DutchAuctionMarket = {
 export type AdvDutchAuctionMarket = {
    base: BaseMarket;
    config: DutchAuctionMarketConfig;
-   max_deviation: number; // u16
    max_risk: bigint; // u64
    outcomes: BaseMarketOutcome[];
 };
@@ -359,9 +359,10 @@ export type CreateAdvControlledMarketInstruction = {
    base: BaseCreateMarketInstruction;
    outcomes: ControlledMarketOutcome[];
    go_live_time: number; // u32
-   max_deviation: number; // u16
    max_risk: bigint; // u64
-   liquidity: bigint; // u64: initial liquidity; bets add to it (buy increases, sell decreases)
+   bonus_cap: number; // u16
+   over_risk_penalty: number; // u16
+   liquidity: bigint; // u64: initial counter; with FactoredLiquidity oracle, effective L = this * factor / PC_SCALE
    parlay_settings: ParlaySettings;
 };
 
@@ -369,7 +370,6 @@ export type CreateIntControlledMarketInstruction = {
    base: BaseCreateMarketInstruction;
    outcomes: ControlledMarketOutcome[];
    go_live_time: number; // u32
-   max_deviation: number; // u16
    max_risk: bigint; // u64
    parlay_settings: ParlaySettings;
 };
@@ -397,7 +397,6 @@ export type CreateAdvDutchAuctionMarketInstruction = {
    base: BaseCreateMarketInstruction;
    outcomes: BaseMarketOutcome[];
    trigger_price: number; // u16
-   max_deviation: number; // u16
    max_risk: bigint; // u64
 };
 

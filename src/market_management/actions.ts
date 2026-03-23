@@ -240,7 +240,7 @@ export async function getControlledCreateMarketInstruction(
  * @param outcomes - Array of outcomes with names and decimal odds (e.g. 2.5 for 2.5 odds). The program requires de-vigged odds. The SDK will automatically de-vig by multiplying each odd by the overround (sum of 1/odd for all outcomes). If you want to use a different de-vigging method, provide already de-vigged odds.
  * @param liquidity_ui - The initial liquidity in UI units (e.g. 1000.0 for 1000 USDC)
  * @param parlaySettings - Parlay configuration (enabled, optional oddsFactor, optional liquidityFactor_ui in UI units, optional excludeMarkets)
- * @param riskControl - Risk control configuration (maxDeviation, maxRisk) - required for AdvControlled
+ * @param riskControl - Risk control (maxRisk, bonusCap, overRiskPenalty) — required for AdvControlled
  * @param tokenInfo - Token information (mint address and decimals)
  * @param tokenProgram - The token program address (defaults to TOKEN_PROGRAM_ADDR)
  * @returns The instruction
@@ -263,7 +263,7 @@ export async function getControlledCreateMarketInstruction(
    outcomes: {name: string, odds_dec: number}[],
    liquidity_ui: number,
    parlaySettings: { parlayEnabled: boolean, parlayOddsFactor?: number, parlayLiquidityFactor_ui?: number, excludeMarkets?: bigint[] },
-   riskControl: { maxDeviation: number, maxRisk: bigint },
+   riskControl: { maxRisk: bigint, bonusCap: number, overRiskPenalty: number },
    tokenInfo: { mint: Address, decimals: number },
    tokenProgram?: Address,
 ): Promise<Instruction>
@@ -285,7 +285,7 @@ export async function getControlledCreateMarketInstruction(
    outcomes: {name: string, odds_dec: number}[],
    liquidity_ui: number,
    parlaySettings: { parlayEnabled: boolean, parlayOddsFactor?: number, parlayLiquidityFactor_ui?: number, excludeMarkets?: bigint[] },
-   riskControl: null | { maxDeviation: number, maxRisk: bigint },
+   riskControl: null | { maxRisk: bigint, bonusCap: number, overRiskPenalty: number },
    tokenInfo: { mint: Address, decimals: number },
    tokenProgram: Address = TOKEN_PROGRAM_ADDR,
 ): Promise<Instruction> {
@@ -312,11 +312,9 @@ export async function getControlledCreateMarketInstruction(
    validateTokenInfo(tokenInfo);
    validateParlaySettings(marketId, parlaySettings, tokenInfo.decimals);
    if(marketType === "AdvControlled" && riskControl !== null){
-      validateUint16(riskControl.maxDeviation);
       validateUint64(riskControl.maxRisk);
-      if(riskControl.maxDeviation <= 0){
-         throw new Error("Max deviation must be > 0");
-      }
+      validateUint16(riskControl.bonusCap);
+      validateUint16(riskControl.overRiskPenalty);
       if(riskControl.maxRisk <= 0){
          throw new Error("Max risk must be > 0");
       }
@@ -371,8 +369,9 @@ export async function getControlledCreateMarketInstruction(
       marketType === "AdvControlled" && riskControl !== null
          ? {
             ...baseMarketInstruction,
-            max_deviation: riskControl.maxDeviation,
             max_risk: riskControl.maxRisk,
+            bonus_cap: riskControl.bonusCap,
+            over_risk_penalty: riskControl.overRiskPenalty,
             liquidity: uiToScaled(liquidity_ui, tokenInfo.decimals),
             outcomes: scaledOutcomes.map((outcome) => ({
                ...outcome,
@@ -435,7 +434,7 @@ export async function getOneVOneCreateMarketInstruction(
    rulesUrl: string,
    feeOverride: false | {productFlatFee_ui: number, productPcFee_pc: number, productWinFee_pc: number, productPerformanceFee_pc: number }, // _pc values are in decimal format (0-1, e.g. 0.05 for 5%)
    trim_pc: number,
-   resolutionMethod: "oracle" | Address,
+   resolutionMethod: {oracleUpdater: Address} | {marketAdmin: Address},
    outcomeNames: string[],
    challengerStakes_ui: number[],
    challengers: [Address, Address],
@@ -456,9 +455,22 @@ export async function getOneVOneCreateMarketInstruction(
       validatePc(feeOverride.productPerformanceFee_pc);
    }
    validatePc(trim_pc);
-   if(resolutionMethod !== 'oracle'){
-      assertIsAddress(resolutionMethod);
+
+   let resolutionType: "oracle" | "marketAdmin" | undefined = undefined;
+   let marketAdmin: Address | undefined = undefined;
+   let oracleUpdater: Address | undefined = undefined;
+   if("oracleUpdater" in resolutionMethod){
+      oracleUpdater = resolutionMethod.oracleUpdater;
+      resolutionType = "oracle";
+      assertIsAddress(oracleUpdater);
+   }else if ("marketAdmin" in resolutionMethod){
+      marketAdmin = resolutionMethod.marketAdmin;
+      resolutionType = "marketAdmin";
+      assertIsAddress(marketAdmin);
+   } else {
+      throw new Error("Invalid resolution method");
    }
+
    if(outcomeNames.length != 2){
       throw new Error("There must be two outcomes");
    }
@@ -510,9 +522,9 @@ export async function getOneVOneCreateMarketInstruction(
          },
          lock_time: times.marketLockTime,
          trim: trim_pc * PC_SCALE,
-         resolution_authority: resolutionMethod === 'oracle'
+         resolution_authority: resolutionType === 'oracle'
             ? { method: { __kind: 'Oracle' }, account: (await getOraclePDA(productId, marketId))[0] }
-            : { method: { __kind: 'Manual' }, account: resolutionMethod },
+            : { method: { __kind: 'Manual' }, account: marketAdmin! },
          fee_override: feeOverride !== false,
          flat_fee: feeOverride ? uiToScaled(feeOverride.productFlatFee_ui, tokenInfo.decimals) : safeBigInt(0),
          pc_fee: feeOverride ? feeOverride.productPcFee_pc * PC_SCALE : 0,
@@ -528,8 +540,8 @@ export async function getOneVOneCreateMarketInstruction(
       productId,
       tokenInfo.mint,
       tokenProgram,
-      resolutionMethod === 'oracle' ? undefined : resolutionMethod,
-      resolutionMethod === 'oracle',
+      resolutionType === 'oracle' ? oracleUpdater : marketAdmin!,
+      resolutionType === 'oracle',
    );
 }
 
@@ -570,7 +582,7 @@ export async function getOneVManyCreateMarketInstruction(
    rulesUrl: string,
    feeOverride: false | {productFlatFee_ui: number, productPcFee_pc: number, productWinFee_pc: number, productPerformanceFee_pc: number }, // _pc values are in decimal format (0-1, e.g. 0.05 for 5%)
    trim_pc: number,
-   resolutionMethod: "oracle" | Address,
+   resolutionMethod: {oracleUpdater: Address} | {marketAdmin: Address},
    outcomeNames: string[],
    outcomeOdds_dec: number[],
    challenger: Address,
@@ -593,9 +605,22 @@ export async function getOneVManyCreateMarketInstruction(
       validatePc(feeOverride.productPerformanceFee_pc);
    }
    validatePc(trim_pc);
-   if(resolutionMethod !== 'oracle'){
-      assertIsAddress(resolutionMethod);
+
+   let resolutionType: "oracle" | "marketAdmin" | undefined = undefined;
+   let marketAdmin: Address | undefined = undefined;
+   let oracleUpdater: Address | undefined = undefined;
+   if("oracleUpdater" in resolutionMethod){
+      oracleUpdater = resolutionMethod.oracleUpdater;
+      resolutionType = "oracle";
+      assertIsAddress(oracleUpdater);
+   }else if ("marketAdmin" in resolutionMethod){
+      marketAdmin = resolutionMethod.marketAdmin;
+      resolutionType = "marketAdmin";
+      assertIsAddress(marketAdmin);
+   } else {
+      throw new Error("Invalid resolution method");
    }
+
    if(outcomeNames.length != 2){
       throw new Error("There must be two outcomes");
    }
@@ -647,9 +672,9 @@ export async function getOneVManyCreateMarketInstruction(
          },
          lock_time: times.marketLockTime,
          trim: trim_pc * PC_SCALE,
-         resolution_authority: resolutionMethod === 'oracle'
+         resolution_authority: resolutionType === 'oracle'
             ? { method: { __kind: 'Oracle' }, account: (await getOraclePDA(productId, marketId))[0] }
-            : { method: { __kind: 'Manual' }, account: resolutionMethod },
+            : { method: { __kind: 'Manual' }, account: marketAdmin! },
          fee_override: feeOverride !== false,
          flat_fee: feeOverride ? uiToScaled(feeOverride.productFlatFee_ui, tokenInfo.decimals) : safeBigInt(0),
          pc_fee: feeOverride ? feeOverride.productPcFee_pc * PC_SCALE : 0,
@@ -666,8 +691,8 @@ export async function getOneVManyCreateMarketInstruction(
       productId,
       tokenInfo.mint,
       tokenProgram,
-      resolutionMethod === 'oracle' ? undefined : resolutionMethod,
-      resolutionMethod === 'oracle',
+      resolutionType === 'oracle' ? oracleUpdater : marketAdmin!,
+      resolutionType === 'oracle',
    );
 }
 

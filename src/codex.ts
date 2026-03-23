@@ -524,8 +524,9 @@ const getAdvControlledMarketDecoder = (): Decoder<types.AdvControlledMarket> =>
       ['base', getBaseMarketDecoder()],
       ['go_live_time', getU32Decoder()],
       ['rollback_account_key', getAddressDecoder()],
-      ['max_deviation', getU16Decoder()],
       ['max_risk', getU64BigintDecoder()],
+      ['bonus_cap', getU16Decoder()],
+      ['over_risk_penalty', getU16Decoder()],
       ['liquidity', getU64BigintDecoder()],
       ['outcomes', getArrayDecoder(getControlledMarketOutcomeDecoder())],
       ['parlay_settings', getParlaySettingsDecoder()],
@@ -536,7 +537,6 @@ const getIntControlledMarketDecoder = (): Decoder<types.IntControlledMarket> =>
       ['base', getBaseMarketDecoder()],
       ['go_live_time', getU32Decoder()],
       ['rollback_account_key', getAddressDecoder()],
-      ['max_deviation', getU16Decoder()],
       ['max_risk', getU64BigintDecoder()],
       ['outcomes', getArrayDecoder(getControlledMarketOutcomeDecoder())],
       ['parlay_settings', getParlaySettingsDecoder()],
@@ -586,7 +586,6 @@ const getAdvDutchAuctionMarketDecoder = (): Decoder<types.AdvDutchAuctionMarket>
    getStructDecoder([
       ['base', getBaseMarketDecoder()],
       ['config', getDutchAuctionMarketConfigDecoder()],
-      ['max_deviation', getU16Decoder()],
       ['max_risk', getU64BigintDecoder()],
       ['outcomes', getArrayDecoder(getBaseMarketOutcomeDecoder())],
    ]);
@@ -688,8 +687,9 @@ const getCreateAdvControlledMarketInstructionEncoder = (): Encoder<types.CreateA
       ['base', getBaseCreateMarketInstructionEncoder()],
       ['outcomes', getArrayEncoder(getControlledMarketOutcomeEncoder())],
       ['go_live_time', getU32Encoder()],
-      ['max_deviation', getU16Encoder()],
       ['max_risk', getU64BigintEncoder()],
+      ['bonus_cap', getU16Encoder()],
+      ['over_risk_penalty', getU16Encoder()],
       ['liquidity', getU64BigintEncoder()],
       ['parlay_settings', getParlaySettingsEncoder()],
    ]);
@@ -699,7 +699,6 @@ const getCreateIntControlledMarketInstructionEncoder = (): Encoder<types.CreateI
       ['base', getBaseCreateMarketInstructionEncoder()],
       ['outcomes', getArrayEncoder(getControlledMarketOutcomeEncoder())],
       ['go_live_time', getU32Encoder()],
-      ['max_deviation', getU16Encoder()],
       ['max_risk', getU64BigintEncoder()],
       ['parlay_settings', getParlaySettingsEncoder()],
    ]);
@@ -737,7 +736,6 @@ const getCreateAdvDutchAuctionMarketInstructionEncoder = (): Encoder<types.Creat
       ['base', getBaseCreateMarketInstructionEncoder()],
       ['outcomes', getArrayEncoder(getBaseMarketOutcomeEncoder())],
       ['trigger_price', getU16Encoder()],
-      ['max_deviation', getU16Encoder()],
       ['max_risk', getU64BigintEncoder()],
    ]);
 

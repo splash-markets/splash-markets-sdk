@@ -1,10 +1,14 @@
 import { Rpc, SolanaRpcApi, Address } from "@solana/kit";
 import { getMarketDecoder, getOracleAccountDecoder, getLiveRollbackAccountDecoder } from "../codex";
-import { LiveRollbackAccount, Market, OracleAccount } from "../types";
+import { LiveRollbackAccount, Market, OracleAccount, BaseMarketOutcome, ControlledMarketOutcome } from "../types";
 import { getMarketPDA, buildOptimizedFilters, FilterField, getOraclePDA, getMarketLiveRollbackPDA } from "../solana_utils";
 import { u16ToBuffer, u8ToBuffer, u32ToBuffer, base64ToUint8Array, safeBigInt, uiToScaled, scaledToUi } from "../utils";
 import { MARKET_ACCOUNT_TYPE, RATIO_SCALE, PC_SCALE, PROGRAM_ADDR } from "../constants";
 import { AccountNotFoundError, RpcError, ValidationRequiredError, ValidationTypeError, OperationError, DecodingError, UnknownError } from "../errors";
+import { computeAdvControlledPayout } from "./adv_controlled_math";
+
+export { computeAdvControlledPayout } from "./adv_controlled_math";
+export type { AdvOddsOperation } from "./adv_controlled_math";
 
 const marketDecoder = getMarketDecoder();
 const oracleAccountDecoder = getOracleAccountDecoder();
@@ -139,16 +143,17 @@ function buildMarketFilterFields(
          switch (additionalFilters.market_type) {
             case 'Uncontrolled': return 0;
             case 'DirectControlled': return 1;
-            case 'AdvControlled': return 2;
-            case 'OneVOne': return 3;
-            case 'OneVMany': return 4;
-            case 'DutchAuction': return 5;
-            case 'AdvDutchAuction': return 6;
+            case 'IntControlled': return 2;
+            case 'AdvControlled': return 3;
+            case 'OneVOne': return 4;
+            case 'OneVMany': return 5;
+            case 'DutchAuction': return 6;
+            case 'AdvDutchAuction': return 7;
             default: throw new ValidationTypeError(
                `Invalid market type`,
                'market_type',
                additionalFilters.market_type,
-               'Uncontrolled | DirectControlled | AdvControlled | OneVOne | OneVMany | DutchAuction | AdvDutchAuction'
+               'Uncontrolled | DirectControlled | IntControlled | AdvControlled | OneVOne | OneVMany | DutchAuction | AdvDutchAuction'
             );
          }
       })();
@@ -312,52 +317,511 @@ export async function getLiveRollbackAccount(
    }
 }
 
+/** Display ratio `num/den`; mirrors on-chain checked_div (denominator must be non-zero). */
+function ratioBigInt(num: bigint, den: bigint, detail: string): number {
+   if (den === 0n) {
+      throw new OperationError(`Division by zero: ${detail}`, "calculateOddsFromMarketData");
+   }
+   return Number(num) / Number(den);
+}
 
 /**
- * Calculate the odds for all outcomes in a market based on the market data and oracle data and a stake
- * @param marketData - the market data
- * @param oracleData - the oracle data (if null, the market is uncontrolled)
- * @param scaledStake - the stake in scaled amount (e.g. 10_000_000 for 10 USDC)
- * @returns an array of { outcomeIndex: number, outcomeName: string, screenOdds_dec: number, screenOdds_prob: number, stakeOdds_dec: number, stakeOdds_prob: number } for each outcome
+ * Client-side odds preview aligned with `calculate_bet_impact` / pool maths in `splash-markets-program-v2` (`utils.rs`, `adv_controlled_bet.rs`).
+ *
+ * - **Buys:** `scaledAmount` is stake (lamports scaled), same as the program `amount` on buy instructions.
+ * - **Sells:** `scaledAmount` is shares sold. The program also derives **effective stake** from the bet account; this preview passes the same value for stake and shares in `computeAdvControlledPayout`, so it matches when stake-per-share is 1:1 with your input (e.g. full exit).
+ * - **`outcomeIndex`:** Omit for every outcome in one array. With `scaledAmount > 0`, each row’s `amountOdds_*` assumes a trade on that row’s outcome (uncontrolled / adv-controlled). With a single `outcomeIndex`, amount-impact odds match a trade on that outcome only (unchanged).
  */
 export function calculateOddsFromMarketData(
    marketData: Market,
    oracleData: OracleAccount | null,
-   scaledStake: bigint = 0n,
-): { 
-   outcomeIndex: number, outcomeName: string, 
-   screenOdds_dec: number, screenOdds_prob: number, 
-   stakeOdds_dec: number, stakeOdds_prob: number 
+   scaledAmount: bigint = 0n,
+   operation: "BuyFor" | "BuyAgainst" | "SellFor" | "SellAgainst" = "BuyFor",
+   outcomeIndex?: number,
+): {
+   outcomeIndex: number;
+   outcomeName: string;
+   screenOdds_dec: number;
+   screenOdds_prob: number;
+   amountOdds_dec: number;
+   amountOdds_prob: number;
 }[] {
-
-   if (marketData.__kind === "AdvControlled" || marketData.__kind === "DirectControlled" || marketData.__kind === "IntControlled") {
-      if (!oracleData) {
-         throw new ValidationRequiredError(
-            "Oracle account data is required for direct controlled markets",
-            'oracleData'
-         );
-      }
-
-     throw new Error("Controlled market maths pending")
-
-   } else if (marketData.__kind === "Uncontrolled") {
-      const sumBal = marketData.outcomes.reduce((acc, outcome) => acc + outcome.outcome_balance, 0n);
-      return marketData.outcomes.map((outcome, i) => ({
-         outcomeIndex: i + 1, // 1-indexed (outcomes are 1-indexed in the program)
-         outcomeName: outcome.outcome_identifier.outcome_name,
-         screenOdds_dec: Number(sumBal) / Number(outcome.outcome_balance),
-         screenOdds_prob: Number(outcome.outcome_balance) / Number(sumBal),
-         stakeOdds_dec: Number(sumBal + scaledStake) / Number(outcome.outcome_balance + scaledStake),
-         stakeOdds_prob: Number(outcome.outcome_balance + scaledStake) / Number(sumBal + scaledStake),
-      }));
-   } else {
+   if (marketData.__kind === "IntControlled") {
       throw new ValidationTypeError(
-         "Invalid market type for odds calculation",
+         "IntControlled market type is not yet supported",
          'marketData.__kind',
-         marketData.__kind,
-         'Uncontrolled | AdvControlled | DirectControlled'
+         'IntControlled',
+         'Uncontrolled | AdvControlled | DirectControlled | OneVOne | OneVMany'
       );
    }
+
+   if (marketData.__kind === "OneVOne") {
+      if (marketData.base.market_config.status.__kind === "PendingFullfillment") {
+         if (operation !== "BuyFor") {
+            throw new OperationError("Only BuyFor operations allowed during fixed odds phase", 'calculateOddsFromMarketData');
+         }
+         const sumBal = marketData.outcomes.reduce((acc: bigint, o: BaseMarketOutcome) => acc + o.outcome_balance, 0n);
+         return marketData.outcomes.map((outcome: BaseMarketOutcome, i: number) => {
+            const bal = outcome.outcome_balance;
+            const decOdds = ratioBigInt(sumBal, bal, "fixed odds: outcome balance is zero");
+            const pcOdds = ratioBigInt(bal, sumBal, "fixed odds: pool sum is zero");
+            return {
+               outcomeIndex: i + 1,
+               outcomeName: outcome.outcome_identifier.outcome_name,
+               screenOdds_dec: decOdds,
+               screenOdds_prob: pcOdds,
+               amountOdds_dec: decOdds,
+               amountOdds_prob: pcOdds,
+            };
+         });
+      }
+      return calcUncontrolledOdds(
+         marketData.outcomes,
+         scaledAmount,
+         operation,
+         marketData.base.market_config.trim,
+         outcomeIndex,
+      );
+   }
+
+   if (marketData.__kind === "OneVMany") {
+      if (marketData.base.market_config.status.__kind === "PendingFullfillment") {
+         if (operation !== "BuyFor") {
+            throw new OperationError("Only BuyFor operations allowed during fixed odds phase", 'calculateOddsFromMarketData');
+         }
+         const sumBal = marketData.challenger_amount + marketData.opposition_amount;
+         return marketData.outcomes.map((outcome: BaseMarketOutcome, i: number) => {
+            const bal = outcome.outcome_balance;
+            const decOdds = ratioBigInt(sumBal, bal, "OneVMany fixed odds: outcome balance is zero");
+            const pcOdds = ratioBigInt(bal, sumBal, "OneVMany fixed odds: pool sum is zero");
+            return {
+               outcomeIndex: i + 1,
+               outcomeName: outcome.outcome_identifier.outcome_name,
+               screenOdds_dec: decOdds,
+               screenOdds_prob: pcOdds,
+               amountOdds_dec: decOdds,
+               amountOdds_prob: pcOdds,
+            };
+         });
+      }
+      return calcUncontrolledOdds(
+         marketData.outcomes,
+         scaledAmount,
+         operation,
+         marketData.base.market_config.trim,
+         outcomeIndex,
+      );
+   }
+
+   if (marketData.__kind === "Uncontrolled") {
+      return calcUncontrolledOdds(
+         marketData.outcomes,
+         scaledAmount,
+         operation,
+         marketData.base.market_config.trim,
+         outcomeIndex,
+      );
+   }
+
+   if (marketData.__kind === "DirectControlled") {
+      if (!oracleData) {
+         throw new ValidationRequiredError("Oracle account data is required for controlled markets", 'oracleData');
+      }
+      return calcDirectControlledOdds(marketData, oracleData, scaledAmount, operation);
+   }
+
+   if (marketData.__kind === "AdvControlled") {
+      if (!oracleData) {
+         throw new ValidationRequiredError("Oracle account data is required for AdvControlled markets", 'oracleData');
+      }
+      return calcAdvControlledOdds(marketData, oracleData, scaledAmount, operation, outcomeIndex);
+   }
+
+   throw new ValidationTypeError(
+      "Invalid market type for odds calculation",
+      'marketData.__kind',
+      marketData.__kind,
+      'Uncontrolled | AdvControlled | DirectControlled | OneVOne | OneVMany'
+   );
+}
+
+/** Post-trade balances: same structure as `calculate_simple_market_bet` in program `utils.rs`. */
+export function calculateSimpleMarketNewBalances(
+   currentBalances: readonly bigint[],
+   operation: "BuyFor" | "BuyAgainst" | "SellFor" | "SellAgainst",
+   amount: bigint,
+   outcomeIndex: number,
+   trim: number,
+): { newBalances: bigint[]; poolSum: bigint } {
+   const PC = BigInt(PC_SCALE);
+   const oneMinusTrim = PC - BigInt(trim);
+   const idx = outcomeIndex - 1;
+   if (outcomeIndex < 1 || outcomeIndex > currentBalances.length) {
+      throw new OperationError("Invalid outcome index (1-based)", "calculateOddsFromMarketData");
+   }
+
+   const sum = currentBalances.reduce((a, b) => a + b, 0n);
+
+   if (operation === "BuyFor") {
+      const trimmed = (amount * oneMinusTrim) / PC;
+      const newBalances = [...currentBalances];
+      newBalances[idx] = newBalances[idx]! + trimmed;
+      return { newBalances, poolSum: newBalances.reduce((a, b) => a + b, 0n) };
+   }
+
+   if (operation === "BuyAgainst") {
+      const outcomeBal = currentBalances[idx]!;
+      const otherSumBefore = sum - outcomeBal;
+      if (otherSumBefore === 0n) {
+         throw new OperationError("BuyAgainst: other outcome balances sum is zero", "calculateOddsFromMarketData");
+      }
+      const newBalances = [...currentBalances];
+      for (let i = 0; i < newBalances.length; i++) {
+         if (i !== idx) {
+            const additional =
+               (((newBalances[i]! * amount) / otherSumBefore) * oneMinusTrim) / PC;
+            newBalances[i] = newBalances[i]! + additional;
+         }
+      }
+      return { newBalances, poolSum: newBalances.reduce((a, b) => a + b, 0n) };
+   }
+
+   if (operation === "SellFor") {
+      const trimmed = (amount * oneMinusTrim) / PC;
+      const newOutcome = currentBalances[idx]! - trimmed;
+      if (newOutcome < 0n) {
+         throw new OperationError("SellFor: insufficient outcome balance", "calculateOddsFromMarketData");
+      }
+      const newBalances = [...currentBalances];
+      newBalances[idx] = newOutcome;
+      return { newBalances, poolSum: newBalances.reduce((a, b) => a + b, 0n) };
+   }
+
+   const trimmedAmount = (amount * oneMinusTrim) / PC;
+   const outcomeBal = currentBalances[idx]!;
+   const otherSumBefore = sum - outcomeBal;
+   if (otherSumBefore === 0n) {
+      throw new OperationError("SellAgainst: other outcome balances sum is zero", "calculateOddsFromMarketData");
+   }
+   const newBalances = [...currentBalances];
+   for (let i = 0; i < newBalances.length; i++) {
+      if (i !== idx) {
+         const reduction =
+            (((newBalances[i]! * trimmedAmount) / otherSumBefore) * oneMinusTrim) / PC;
+         const next = newBalances[i]! - reduction;
+         if (next < 0n) {
+            throw new OperationError("SellAgainst: insufficient outcome balance", "calculateOddsFromMarketData");
+         }
+         newBalances[i] = next;
+      }
+   }
+   return { newBalances, poolSum: newBalances.reduce((a, b) => a + b, 0n) };
+}
+
+function uncontrolledScreenOddsPair(
+   operation: "BuyFor" | "BuyAgainst" | "SellFor" | "SellAgainst",
+   bal: bigint,
+   sumBal: bigint,
+): { pcOdds: number; decOdds: number } {
+   if (sumBal === 0n) {
+      throw new OperationError("Uncontrolled: pool sum is zero", "calculateOddsFromMarketData");
+   }
+   if (operation === "BuyFor" || operation === "SellFor") {
+      return {
+         pcOdds: ratioBigInt(bal, sumBal, "outcome probability: pool sum is zero"),
+         decOdds: ratioBigInt(sumBal, bal, "decimal odds: outcome balance is zero"),
+      };
+   }
+   const otherBal = sumBal - bal;
+   return {
+      pcOdds: ratioBigInt(otherBal, sumBal, "against probability: other side sum is zero"),
+      decOdds: ratioBigInt(sumBal, otherBal, "decimal odds (against): other side sum is zero"),
+   };
+}
+
+function calcUncontrolledOdds(
+   outcomes: BaseMarketOutcome[],
+   amount: bigint,
+   operation: "BuyFor" | "BuyAgainst" | "SellFor" | "SellAgainst",
+   trim: number,
+   outcomeIndex?: number,
+): {
+   outcomeIndex: number;
+   outcomeName: string;
+   screenOdds_dec: number;
+   screenOdds_prob: number;
+   amountOdds_dec: number;
+   amountOdds_prob: number;
+}[] {
+   const sumBal = outcomes.reduce((acc: bigint, o: BaseMarketOutcome) => acc + o.outcome_balance, 0n);
+   const balances = outcomes.map((o) => o.outcome_balance);
+
+   type Sim = { newBalances: bigint[]; poolSum: bigint };
+   let singleSim: Sim | null = null;
+   let perOutcomeSim: Sim[] | null = null;
+   if (amount > 0n) {
+      if (outcomeIndex !== undefined) {
+         if (outcomeIndex < 1 || outcomeIndex > outcomes.length) {
+            throw new OperationError(
+               "outcomeIndex must be between 1 and number of outcomes when amount is non-zero",
+               "calculateOddsFromMarketData",
+            );
+         }
+         singleSim = calculateSimpleMarketNewBalances(balances, operation, amount, outcomeIndex, trim);
+      } else {
+         perOutcomeSim = outcomes.map((_, j) =>
+            calculateSimpleMarketNewBalances(balances, operation, amount, j + 1, trim),
+         );
+      }
+   }
+
+   return outcomes.map((outcome: BaseMarketOutcome, i: number) => {
+      const bal = outcome.outcome_balance;
+      const { pcOdds, decOdds } = uncontrolledScreenOddsPair(operation, bal, sumBal);
+
+      let pcOddsAmount = pcOdds;
+      let decOddsAmount = decOdds;
+      if (singleSim !== null) {
+         const poolSumAfter = singleSim.poolSum;
+         if (poolSumAfter === 0n) {
+            throw new OperationError("Post-trade pool sum is zero", "calculateOddsFromMarketData");
+         }
+         const nb = singleSim.newBalances[i]!;
+         pcOddsAmount = ratioBigInt(nb, poolSumAfter, "post-trade outcome probability");
+         decOddsAmount = ratioBigInt(poolSumAfter, nb, "post-trade decimal odds: outcome balance is zero");
+      } else if (perOutcomeSim !== null) {
+         const sim = perOutcomeSim[i]!;
+         const poolSumAfter = sim.poolSum;
+         if (poolSumAfter === 0n) {
+            throw new OperationError("Post-trade pool sum is zero", "calculateOddsFromMarketData");
+         }
+         const nb = sim.newBalances[i]!;
+         pcOddsAmount = ratioBigInt(nb, poolSumAfter, "post-trade outcome probability");
+         decOddsAmount = ratioBigInt(poolSumAfter, nb, "post-trade decimal odds: outcome balance is zero");
+      }
+
+      return {
+         outcomeIndex: i + 1,
+         outcomeName: outcome.outcome_identifier.outcome_name,
+         screenOdds_dec: decOdds,
+         screenOdds_prob: pcOdds,
+         amountOdds_dec: decOddsAmount,
+         amountOdds_prob: pcOddsAmount,
+      };
+   });
+}
+
+function calcDirectControlledOdds(
+   marketData: { outcomes: ControlledMarketOutcome[] },
+   oracleData: OracleAccount,
+   amount: bigint,
+   operation: 'BuyFor' | 'BuyAgainst' | 'SellFor' | 'SellAgainst',
+): { outcomeIndex: number; outcomeName: string; screenOdds_dec: number; screenOdds_prob: number; amountOdds_dec: number; amountOdds_prob: number }[] {
+   const outcomes = marketData.outcomes;
+   const scale = BigInt(PC_SCALE);
+
+   const oracleProbs = oracleData.data.__kind === "ControlledLiquidity" || oracleData.data.__kind === "FactoredLiquidity"
+      ? oracleData.data.probabilities.map(p => BigInt(p))
+      : null;
+
+   if (!oracleProbs || oracleProbs.length !== outcomes.length) {
+      throw new OperationError("Oracle probabilities not available or length mismatch", 'calculateOddsFromMarketData');
+   }
+
+   let newBalanceSum: bigint;
+   if (oracleData.data.__kind === "ControlledLiquidity") {
+      newBalanceSum = oracleData.data.liquidity;
+   } else {
+      throw new OperationError("DirectControlled requires ControlledLiquidity oracle", 'calculateOddsFromMarketData');
+   }
+
+   const adjustedBalances = oracleProbs.map((prob) => {
+      if (prob === 0n) throw new OperationError("Betting is closed", "calculateOddsFromMarketData");
+      return (newBalanceSum * prob) / scale;
+   });
+   const adjustedSum = adjustedBalances.reduce((acc, bal) => acc + bal, 0n);
+   if (adjustedSum === 0n) {
+      throw new OperationError("DirectControlled: oracle-implied pool sum is zero", "calculateOddsFromMarketData");
+   }
+
+   return outcomes.map((outcome, i) => {
+      const adjustedBalance = adjustedBalances[i];
+      if (adjustedBalance === undefined) throw new OperationError("Adjusted balance not found", "calculateOddsFromMarketData");
+
+      let pcOdds: number;
+      let decOdds: number;
+      let pcOddsStake: number;
+      let decOddsStake: number;
+
+      if (operation === "BuyFor") {
+         pcOdds = ratioBigInt(adjustedBalance, adjustedSum, "DirectControlled BuyFor screen prob");
+         decOdds = ratioBigInt(adjustedSum, adjustedBalance, "DirectControlled BuyFor screen dec");
+         pcOddsStake = ratioBigInt(adjustedBalance + amount, adjustedSum + amount, "DirectControlled BuyFor post prob");
+         decOddsStake = ratioBigInt(adjustedSum + amount, adjustedBalance + amount, "DirectControlled BuyFor post dec");
+      } else if (operation === "BuyAgainst") {
+         const otherBal = adjustedSum - adjustedBalance;
+         pcOdds = ratioBigInt(otherBal, adjustedSum, "DirectControlled BuyAgainst screen prob");
+         decOdds = ratioBigInt(adjustedSum, otherBal, "DirectControlled BuyAgainst screen dec");
+         pcOddsStake = ratioBigInt(otherBal + amount, adjustedSum + amount, "DirectControlled BuyAgainst post prob");
+         decOddsStake = ratioBigInt(adjustedSum + amount, otherBal + amount, "DirectControlled BuyAgainst post dec");
+      } else if (operation === "SellFor") {
+         pcOdds = ratioBigInt(adjustedBalance, adjustedSum, "DirectControlled SellFor screen prob");
+         decOdds = ratioBigInt(adjustedSum, adjustedBalance, "DirectControlled SellFor screen dec");
+         if (amount > adjustedBalance) {
+            throw new OperationError(
+               "DirectControlled SellFor: amount exceeds oracle-implied outcome balance",
+               "calculateOddsFromMarketData",
+            );
+         }
+         const newOutcomeBal = adjustedBalance - amount;
+         const newSumBal = adjustedSum - amount;
+         pcOddsStake = ratioBigInt(newOutcomeBal, newSumBal, "DirectControlled SellFor post prob");
+         decOddsStake = ratioBigInt(newSumBal, newOutcomeBal, "DirectControlled SellFor post dec");
+      } else {
+         const otherBal = adjustedSum - adjustedBalance;
+         pcOdds = ratioBigInt(otherBal, adjustedSum, "DirectControlled SellAgainst screen prob");
+         decOdds = ratioBigInt(adjustedSum, otherBal, "DirectControlled SellAgainst screen dec");
+         if (amount > otherBal) {
+            throw new OperationError(
+               "DirectControlled SellAgainst: amount exceeds oracle-implied other-side balance",
+               "calculateOddsFromMarketData",
+            );
+         }
+         const newOtherBal = otherBal - amount;
+         const newSumBal = adjustedSum - amount;
+         pcOddsStake = ratioBigInt(newOtherBal, newSumBal, "DirectControlled SellAgainst post prob");
+         decOddsStake = ratioBigInt(newSumBal, newOtherBal, "DirectControlled SellAgainst post dec");
+      }
+
+      return {
+         outcomeIndex: i + 1,
+         outcomeName: outcome.outcome_identifier.outcome_name,
+         screenOdds_dec: decOdds,
+         screenOdds_prob: pcOdds,
+         amountOdds_dec: decOddsStake,
+         amountOdds_prob: pcOddsStake,
+      };
+   });
+}
+
+function calcAdvControlledOdds(
+   marketData: {
+      liquidity: bigint;
+      max_risk: bigint;
+      bonus_cap: number;
+      over_risk_penalty: number;
+      outcomes: ControlledMarketOutcome[];
+   },
+   oracleData: OracleAccount,
+   scaledAmount: bigint,
+   operation: "BuyFor" | "BuyAgainst" | "SellFor" | "SellAgainst",
+   outcomeIndex?: number,
+): {
+   outcomeIndex: number;
+   outcomeName: string;
+   screenOdds_dec: number;
+   screenOdds_prob: number;
+   amountOdds_dec: number;
+   amountOdds_prob: number;
+}[] {
+   const outcomes = marketData.outcomes;
+   const scale = BigInt(PC_SCALE);
+
+   const oracleProbs =
+      oracleData.data.__kind === "ControlledLiquidity" || oracleData.data.__kind === "FactoredLiquidity"
+         ? oracleData.data.probabilities.map((p) => BigInt(p))
+         : null;
+
+   if (!oracleProbs || oracleProbs.length !== outcomes.length) {
+      throw new OperationError("Oracle probabilities not available or length mismatch", "calculateOddsFromMarketData");
+   }
+
+   if (oracleData.data.__kind !== "ControlledLiquidity" && oracleData.data.__kind !== "FactoredLiquidity") {
+      throw new OperationError(
+         "AdvControlled requires ControlledLiquidity or FactoredLiquidity oracle",
+         "calculateOddsFromMarketData",
+      );
+   }
+
+   const maxRisk = marketData.max_risk;
+   const bonusCap = BigInt(marketData.bonus_cap);
+   const overRiskPenalty = BigInt(marketData.over_risk_penalty);
+   // Matches on-chain `adv_controlled_bet.rs`: ControlledLiquidity uses oracle liquidity only; FactoredLiquidity uses market.liquidity * factor / PC_SCALE.
+   const effectiveLiquidity =
+      oracleData.data.__kind === "ControlledLiquidity"
+         ? oracleData.data.liquidity
+         : (marketData.liquidity * BigInt(oracleData.data.liquidity_factor)) / scale;
+
+   const sellShares = operation === "SellFor" || operation === "SellAgainst" ? scaledAmount : undefined;
+
+   let netForTradeSingle: bigint | undefined;
+   if (scaledAmount > 0n && outcomeIndex !== undefined) {
+      if (outcomeIndex < 1 || outcomeIndex > outcomes.length) {
+         throw new OperationError("Invalid outcome index (1-based)", "calculateOddsFromMarketData");
+      }
+      const outcomeIdx0 = outcomeIndex - 1;
+      const targetedProb = oracleProbs[outcomeIdx0];
+      if (targetedProb === undefined || targetedProb === 0n) {
+         throw new OperationError("Betting is closed for this outcome", "calculateOddsFromMarketData");
+      }
+      netForTradeSingle = computeAdvControlledPayout(
+         operation,
+         outcomes,
+         outcomeIdx0,
+         scaledAmount,
+         effectiveLiquidity,
+         targetedProb,
+         maxRisk,
+         bonusCap,
+         overRiskPenalty,
+         sellShares,
+      );
+   }
+
+   return outcomes.map((outcome, i) => {
+      const prob = oracleProbs[i] ?? 0n;
+      if (prob === 0n) {
+         throw new OperationError("Betting is closed", "calculateOddsFromMarketData");
+      }
+
+      const screenProb = ratioBigInt(prob, scale, "AdvControlled screen probability");
+      const screenDec = ratioBigInt(scale, prob, "AdvControlled screen decimal odds");
+
+      let amountOddsProb = screenProb;
+      let amountOddsDec = screenDec;
+      if (scaledAmount > 0n) {
+         if (outcomeIndex !== undefined) {
+            if (i + 1 === outcomeIndex) {
+               amountOddsDec = ratioBigInt(netForTradeSingle!, scaledAmount, "AdvControlled trade decimal odds");
+               amountOddsProb = ratioBigInt(scaledAmount, netForTradeSingle!, "AdvControlled trade implied prob");
+            }
+         } else {
+            const netForTrade = computeAdvControlledPayout(
+               operation,
+               outcomes,
+               i,
+               scaledAmount,
+               effectiveLiquidity,
+               prob,
+               maxRisk,
+               bonusCap,
+               overRiskPenalty,
+               sellShares,
+            );
+            amountOddsDec = ratioBigInt(netForTrade, scaledAmount, "AdvControlled trade decimal odds");
+            amountOddsProb = ratioBigInt(scaledAmount, netForTrade, "AdvControlled trade implied prob");
+         }
+      }
+
+      return {
+         outcomeIndex: i + 1,
+         outcomeName: outcome.outcome_identifier.outcome_name,
+         screenOdds_dec: screenDec,
+         screenOdds_prob: screenProb,
+         amountOdds_dec: amountOddsDec,
+         amountOdds_prob: amountOddsProb,
+      };
+   });
 }
 
 /**
@@ -366,24 +830,34 @@ export function calculateOddsFromMarketData(
  * @param productId - the product id
  * @param marketId - the market id
  * @param needsOracle - whether the market needs an oracle to calculate the odds
- * @param scaledStake - the stake in scaled amount (e.g. 10_000_000 for 10 USDC)
- * @returns an array of { outcomeIndex: number, outcomeName: string, screenOdds_dec: number, screenOdds_prob: number, stakeOdds_dec: number, stakeOdds_prob: number } for each outcome
+ * @param outcomeIndex - 1-based outcome for the simulated trade
+ * @param scaledAmount - scaled input amount (stake for buys, shares for sells); default 0 (no size on the trade)
+ * @param operation - defaults to `BuyFor`
+ * @returns an array of { outcomeIndex: number, outcomeName: string, screenOdds_dec: number, screenOdds_prob: number, amountOdds_dec: number, amountOdds_prob: number } for each outcome
  */
 export async function getMarketOdds(
    rpc: Rpc<SolanaRpcApi>,
    productId: number,
    marketId: bigint,
    needsOracle: boolean,
-   scaledStake: bigint = 0n,
+   outcomeIndex: number,
+   scaledAmount: bigint = 0n,
+   operation: "BuyFor" | "BuyAgainst" | "SellFor" | "SellAgainst" = "BuyFor",
 ): Promise<{ 
    outcomeIndex: number, outcomeName: string, 
    screenOdds_dec: number, screenOdds_prob: number, 
-   stakeOdds_dec: number, stakeOdds_prob: number 
+   amountOdds_dec: number, amountOdds_prob: number 
 }[]> {
    try {
       const marketDataP = getMarketFromId(rpc, productId, marketId);
       const oracleDataP = needsOracle ? getOracleFromId(rpc, productId, marketId) : Promise.resolve(null);
-      return calculateOddsFromMarketData(await marketDataP, await oracleDataP, scaledStake);
+      return calculateOddsFromMarketData(
+         await marketDataP,
+         await oracleDataP,
+         scaledAmount,
+         operation,
+         outcomeIndex,
+      );
    } catch (e) {
       // Re-throw all known error types
       if (e instanceof AccountNotFoundError || e instanceof DecodingError || e instanceof RpcError || 
@@ -448,7 +922,13 @@ export async function getParlayReturn(
    
    // Convert back to UI units
    const payout = scaledToUi(potentialReturnScaled, decimals);
+   if (stake === 0) {
+      throw new OperationError("Parlay stake must be non-zero", "getParlayReturn");
+   }
    const slippedOdds_dec = payout / stake;
+   if (slippedOdds_dec === 0) {
+      throw new OperationError("Parlay slipped decimal odds computed as zero", "getParlayReturn");
+   }
    const slippedOdds_prob = 1 / slippedOdds_dec;
    
    return {
@@ -487,8 +967,11 @@ function calculateParlayOddsFromMarketData(
       throw new OperationError(`Oracle data is not ControlledLiquidity or FactoredLiquidity`, 'calculateParlayOddsFromMarketData');
    }
    const prob = oracleData.data.probabilities[outcomeIndex - 1];
-   if(prob === undefined) {
-      throw new OperationError(`Oracle probability not found for outcome ${outcomeIndex}`, 'calculateParlayOddsFromMarketData');
+   if (prob === undefined) {
+      throw new OperationError(`Oracle probability not found for outcome ${outcomeIndex}`, "calculateParlayOddsFromMarketData");
+   }
+   if (prob === 0) {
+      throw new OperationError(`Oracle probability is zero for outcome ${outcomeIndex}`, "calculateParlayOddsFromMarketData");
    }
    if(marketData.__kind !== "AdvControlled" && marketData.__kind !== "DirectControlled" && marketData.__kind !== "IntControlled") {
       throw new OperationError(`Market data is not controlled`, 'calculateParlayOddsFromMarketData');

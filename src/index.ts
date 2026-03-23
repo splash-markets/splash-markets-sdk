@@ -7,6 +7,9 @@ export * from './types';
 // --- Constants ---
 export * from './constants';
 
+// --- Codex ---
+export * from './codex';
+
 // --- Utilities ---
 export * from './utils';
 
