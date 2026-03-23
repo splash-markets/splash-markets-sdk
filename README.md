@@ -534,3 +534,7 @@ import type {
 - Exported codex module
 ## 0.0.3
 - update AdvControlled markets
+## 0.0.4
+- update UpdateOracleInstruction
+## 0.0.5
+- update AdvControlled markets creation to take oracleVariant parameter

@@ -4,7 +4,7 @@ import { round, safeBigInt, safeMultiplyByScale, uiToScaled } from "../utils";
 import { validateTimes, validateTokenInfo, validateParlaySettings, validateBool, validateInt64, validatePc, validateUint16, validateUint32, validateUint64, validateUint8, validateUint8Array } from "../validation";
 import { ValidationRangeError } from "../errors";
 import { buildAddFundsToMarketAtaInstruction, buildCreateMarketInstruction, buildUpdateMarketStatusInstruction, buildResolveMarketInstruction, buildCloseMarketInstruction, buildEditMarketGoLiveTimeInstruction, buildUpdateOracleInstruction } from "./instructions";
-import { CreateMarketInstruction, MarketStatus, ResolveMarketInstruction, ResolveMarketFromOracleInstruction, ResolveMarketFromAdminInstruction, OracleDataVariant, CreateUncontrolledMarketInstruction, CreateDirectControlledMarketInstruction, CreateAdvControlledMarketInstruction, CreateOneVOneMarketInstruction, CreateOneVManyMarketInstruction, ControlledMarketOutcome } from "../types";
+import { CreateMarketInstruction, MarketStatus, ResolveMarketInstruction, ResolveMarketFromOracleInstruction, ResolveMarketFromAdminInstruction, OracleDataVariant, OracleVariantType, CreateUncontrolledMarketInstruction, CreateDirectControlledMarketInstruction, CreateAdvControlledMarketInstruction, CreateOneVOneMarketInstruction, CreateOneVManyMarketInstruction, ControlledMarketOutcome } from "../types";
 import { getOracleDataVariantEncoder } from "../codex";
 import { getOraclePDA } from "../solana_utils";
 const oracleDataVariantEncoder = getOracleDataVariantEncoder();
@@ -218,6 +218,7 @@ export async function getControlledCreateMarketInstruction(
    liquidity_ui: number,
    parlaySettings: { parlayEnabled: boolean, parlayOddsFactor?: number, parlayLiquidityFactor_ui?: number, excludeMarkets?: bigint[] },
    riskControl: null,
+   oracleVariant: OracleVariantType,
    tokenInfo: { mint: Address, decimals: number },
    tokenProgram?: Address,
 ): Promise<Instruction>
@@ -241,6 +242,7 @@ export async function getControlledCreateMarketInstruction(
  * @param liquidity_ui - The initial liquidity in UI units (e.g. 1000.0 for 1000 USDC)
  * @param parlaySettings - Parlay configuration (enabled, optional oddsFactor, optional liquidityFactor_ui in UI units, optional excludeMarkets)
  * @param riskControl - Risk control (maxRisk, bonusCap, overRiskPenalty) — required for AdvControlled
+ * @param oracleVariant - Oracle init variant for AdvControlled: ControlledLiquidity or FactoredLiquidity (ignored for DirectControlled)
  * @param tokenInfo - Token information (mint address and decimals)
  * @param tokenProgram - The token program address (defaults to TOKEN_PROGRAM_ADDR)
  * @returns The instruction
@@ -264,6 +266,7 @@ export async function getControlledCreateMarketInstruction(
    liquidity_ui: number,
    parlaySettings: { parlayEnabled: boolean, parlayOddsFactor?: number, parlayLiquidityFactor_ui?: number, excludeMarkets?: bigint[] },
    riskControl: { maxRisk: bigint, bonusCap: number, overRiskPenalty: number },
+   oracleVariant: OracleVariantType,
    tokenInfo: { mint: Address, decimals: number },
    tokenProgram?: Address,
 ): Promise<Instruction>
@@ -286,6 +289,7 @@ export async function getControlledCreateMarketInstruction(
    liquidity_ui: number,
    parlaySettings: { parlayEnabled: boolean, parlayOddsFactor?: number, parlayLiquidityFactor_ui?: number, excludeMarkets?: bigint[] },
    riskControl: null | { maxRisk: bigint, bonusCap: number, overRiskPenalty: number },
+   oracleVariant: OracleVariantType,
    tokenInfo: { mint: Address, decimals: number },
    tokenProgram: Address = TOKEN_PROGRAM_ADDR,
 ): Promise<Instruction> {
@@ -317,6 +321,10 @@ export async function getControlledCreateMarketInstruction(
       validateUint16(riskControl.overRiskPenalty);
       if(riskControl.maxRisk <= 0){
          throw new Error("Max risk must be > 0");
+      }
+      const ov = oracleVariant.__kind;
+      if(ov !== "ControlledLiquidity" && ov !== "FactoredLiquidity"){
+         throw new Error("AdvControlled oracleVariant must be ControlledLiquidity or FactoredLiquidity");
       }
    }
    assertIsAddress(tokenProgram);
@@ -377,6 +385,7 @@ export async function getControlledCreateMarketInstruction(
                ...outcome,
                outcome_risk: safeBigInt(0),
             })),
+            oracle_variant: oracleVariant,
          }
          : {
             ...baseMarketInstruction,
@@ -864,25 +873,44 @@ export async function getUpdateOracleInstruction(
    oracleUpdater: Address,
    productId: number,
    oracleSeed: bigint,
-   odds: number[],
-   sequence: number = Math.floor(Date.now() / 1000),
+   oracleUpdate: { odds: number[], liquidity: number },
+   oracleType: 'ControlledLiquidity',
+   tokenInfo: { mint: Address; decimals: number },
+   sequence: number,
+): Promise<Instruction>
+export async function getUpdateOracleInstruction(
+   oracleUpdater: Address,
+   productId: number,
+   oracleSeed: bigint,
+   oracleUpdate: { odds: number[], liquidityFactor: number },
+   oracleType: 'FactoredLiquidity',
+   tokenInfo: { mint: Address; decimals: number },
+   sequence: number,
+): Promise<Instruction>
+export async function getUpdateOracleInstruction(
+   oracleUpdater: Address,
+   productId: number,
+   oracleSeed: bigint,
+   oracleUpdate: { odds: number[], liquidity: number} | { odds: number[], liquidityFactor: number},
    oracleType: OracleDataVariant['__kind'],
-   liquidityFactor: number = 1,
+   tokenInfo: { mint: Address; decimals: number },
+   sequence: number  = Math.floor(Date.now() / 1000),
 ): Promise<Instruction> {
    validateUint8(productId);
    validateUint64(oracleSeed);
    validateUint32(sequence);
+   validateTokenInfo(tokenInfo);
    if(sequence <= 0){
       throw new Error("Sequence must be > 0");
    }
    // Validate odds
-   if (odds.length === 0) {
+   if (oracleUpdate.odds.length === 0) {
       throw new Error("Odds array cannot be empty");
    }
-   if (!odds.every(odd => odd == 0) && odds.some(odd => odd <= 1)) {
+   if (!oracleUpdate.odds.every(odd => odd == 0) && oracleUpdate.odds.some(odd => odd <= 1)) {
       throw new Error("All odds must be > 1 or all odds must be 0");
    }
-   if(odds.length > 254){
+   if(oracleUpdate.odds.length > 254){
       throw new Error("Odds array length must be <= 254");
    }
    if(oracleType !== 'ControlledLiquidity' && oracleType !== 'FactoredLiquidity' && oracleType !== 'Resolution'){
@@ -891,42 +919,44 @@ export async function getUpdateOracleInstruction(
    if(oracleType === 'Resolution'){
       throw new Error("This instruction is not supported for Resolution oracle type. Use getSetWinningOutcomeInstruction instead");
    }
-   if(oracleType === 'FactoredLiquidity'){
-      if(liquidityFactor < 0){
-         throw new Error("Liquidity factor must be >= 0");
-      }
-      if(liquidityFactor > PC_SCALE){
-         throw new Error("Liquidity factor must be <= " + PC_SCALE);
-      }
-   }
-
    let scaledOdds: bigint[];
-   if(odds.every(odd => odd == 0)){
-      scaledOdds = odds.map(odd => safeBigInt(0));
+   if(oracleUpdate.odds.every(odd => odd == 0)){
+      scaledOdds = oracleUpdate.odds.map(odd => safeBigInt(0));
    } else {
       // Remove vig: calculate overround as sum of 1/odd for all outcomes
-      const overround = odds.reduce((sum, odd) => sum + (1 / odd), 0);
-      // Scale odds: multiply by RATIO_SCALE (10^6) safely without overflow
-      scaledOdds = odds.map(odd => safeMultiplyByScale(odd * overround, RATIO_SCALE));
+      const overround = oracleUpdate.odds.reduce((sum, odd) => sum + (1 / odd), 0);
+      scaledOdds = oracleUpdate.odds.map(odd => safeMultiplyByScale(odd * overround, RATIO_SCALE));
    }
   
    scaledOdds.forEach(odd => validateUint64(odd));
 
    // Encode oracle data variant (probabilities from odds: prob_i ∝ 1/odd_i, scaled to 0..PC_SCALE)
-   const overroundForProbs = odds.every(odd => odd === 0) ? 1 : odds.reduce((sum, odd) => sum + (odd > 0 ? 1 / odd : 0), 0);
-   const probabilities: number[] = odds.map(odd => odd === 0 ? 0 : round((1 / odd) / overroundForProbs * PC_SCALE, 0));
+   const overroundForProbs = oracleUpdate.odds.every(odd => odd === 0) ? 1 : oracleUpdate.odds.reduce((sum, odd) => sum + (odd > 0 ? 1 / odd : 0), 0);
+   const probabilities: number[] = oracleUpdate.odds.map(odd => odd === 0 ? 0 : round((1 / odd) / overroundForProbs * PC_SCALE, 0));
 
    let oracleData: OracleDataVariant;
    if(oracleType === 'ControlledLiquidity'){
+      if(!('liquidity' in oracleUpdate)){
+         throw new Error("Liquidity is required for ControlledLiquidity oracle type");
+      }
       oracleData = {
          __kind: 'ControlledLiquidity',
          probabilities,
-         liquidity: safeBigInt(0),
+         liquidity: uiToScaled(oracleUpdate.liquidity, tokenInfo.decimals),
       };
    } else if(oracleType === 'FactoredLiquidity'){
+      if(!('liquidityFactor' in oracleUpdate)){
+         throw new Error("Liquidity factor is required for FactoredLiquidity oracle type");
+      }
+      if(oracleUpdate.liquidityFactor < 0){
+         throw new Error("Liquidity factor must be >= 0");
+      }
+      if(oracleUpdate.liquidityFactor > PC_SCALE){
+         throw new Error("Liquidity factor must be <= " + PC_SCALE);
+      }
       oracleData = {
          __kind: 'FactoredLiquidity',
-         liquidity_factor: round(liquidityFactor * PC_SCALE, 0),
+         liquidity_factor: round(oracleUpdate.liquidityFactor * PC_SCALE, 0),
          probabilities,
       };
    } else {

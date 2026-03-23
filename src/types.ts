@@ -364,6 +364,8 @@ export type CreateAdvControlledMarketInstruction = {
    over_risk_penalty: number; // u16
    liquidity: bigint; // u64: initial counter; with FactoredLiquidity oracle, effective L = this * factor / PC_SCALE
    parlay_settings: ParlaySettings;
+   /** Drives on-chain oracle init; must be ControlledLiquidity or FactoredLiquidity (not Resolution). */
+   oracle_variant: OracleVariantType;
 };
 
 export type CreateIntControlledMarketInstruction = {

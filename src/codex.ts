@@ -133,6 +133,19 @@ const getMarketTypeDecoder = (): Decoder<types.MarketType> =>
       }
    );
 
+const getOracleVariantTypeEncoder = (): Encoder<types.OracleVariantType> =>
+   transformEncoder(
+      getU8Encoder(),
+      (v: types.OracleVariantType) => {
+         switch (v.__kind) {
+            case 'ControlledLiquidity': return 0;
+            case 'FactoredLiquidity': return 1;
+            case 'Resolution': return 2;
+            default: return 0;
+         }
+      }
+   );
+
 const getCoreStatusEncoder = (): Encoder<types.CoreStatus> =>
    transformEncoder(
       getU8Encoder(),
@@ -692,6 +705,7 @@ const getCreateAdvControlledMarketInstructionEncoder = (): Encoder<types.CreateA
       ['over_risk_penalty', getU16Encoder()],
       ['liquidity', getU64BigintEncoder()],
       ['parlay_settings', getParlaySettingsEncoder()],
+      ['oracle_variant', getOracleVariantTypeEncoder()],
    ]);
 
 const getCreateIntControlledMarketInstructionEncoder = (): Encoder<types.CreateIntControlledMarketInstruction> =>
